@@ -80,12 +80,13 @@ def fetch_jobs():
 # ---------------------------------------------------------------------------
 
 COLUMN_ALIASES = {
-    "title": ["title", "job_title", "position", "role", "job"],
-    "company": ["company", "employer", "organization"],
-    "location": ["location", "city"],
+    "title": ["title", "role_title", "job_title", "jobtitle", "position", "position_title", "job_role", "designation", "vacancy", "opening", "role", "job"],
+    "company": ["company", "employer", "organization", "organisation"],
+    "location": ["city", "location"],
     "description": ["description", "details", "summary"],
     "skills": ["skills", "tags", "requirements"],
-    "seniority": ["seniority", "level", "experience_level"],
+    "seniority": ["level", "seniority", "experience_level"],
+    "role_family": ["role_family", "job_family", "category", "department", "function"],
 }
 
 # First match wins, so more specific categories come first.
@@ -123,10 +124,18 @@ AI_PATTERN = re.compile(
 
 def normalize(job):
     """Rename whatever columns your Sheet has to the names this script expects."""
-    lowered = {re.sub(r"[\s\-]+", "_", str(k).strip().lower()): (v or "") for k, v in job.items()}
+    lowered = {re.sub(r"[^a-z0-9]+", "_", str(k).strip().lower()).strip("_"): (v or "") for k, v in job.items()}
     out = {}
     for canonical, aliases in COLUMN_ALIASES.items():
-        out[canonical] = next((str(lowered[a]).strip() for a in aliases if a in lowered and lowered[a]), "")
+        value = next((str(lowered[a]).strip() for a in aliases if a in lowered and lowered[a]), "")
+        if not value and canonical == "title":
+            # Last resort: a column whose name contains title, then position, role and so on. Never an id column.
+            for word in ("title", "position|designation|vacanc|role"):
+                value = next((str(v).strip() for k, v in lowered.items()
+                              if v and not k.endswith("_id") and re.search(word, k)), "")
+                if value:
+                    break
+        out[canonical] = value
     return out
 
 
@@ -177,7 +186,11 @@ def count_jobs(raw_jobs):
         usable += 1
         text = " ".join([job["title"], job["description"], job["skills"]])
 
-        role = classify_role(job["title"]) if classify_role(job["title"]) != "Other" else classify_role(text)
+        if job["role_family"]:
+            family = job["role_family"].replace("_", " ").strip()
+            role = family.upper() if len(family) <= 3 else family[:1].upper() + family[1:]
+        else:
+            role = classify_role(job["title"]) if classify_role(job["title"]) != "Other" else classify_role(text)
         roles[role] += 1
         seniority[classify_seniority(job["title"], job["seniority"])] += 1
         for s in find_skills(text, job["skills"]):
@@ -191,7 +204,11 @@ def count_jobs(raw_jobs):
             ai_by_role[role] += 1
 
     if usable == 0:
-        sys.exit("No usable rows. Check that your Jobs tab has a column called title (or job_title, position).")
+        columns = sorted({str(k) for j in raw_jobs for k in j.keys() if str(k).strip()})
+        sys.exit("No usable rows. The columns I found in your Jobs tab are: "
+                 + (", ".join(columns) if columns else "(none)")
+                 + ". Row 1 must hold the column names, and one of them must be title (or job_title, position, role). "
+                 "Rename your job title column to title and run again.")
 
     def top(counter, n):
         return [{"label": k, "count": v} for k, v in counter.most_common(n)]
